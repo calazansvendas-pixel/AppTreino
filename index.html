@@ -54,14 +54,22 @@
             console.error("Erro ao converter __firebase_config:", e);
         }
 
+        // Verificação inteligente se o Firebase está realmente configurado ou se é um mock offline
+        const isFirebaseConfigured = typeof __firebase_config !== 'undefined' && 
+                                     __firebase_config !== null && 
+                                     firebaseConfig.apiKey && 
+                                     !firebaseConfig.apiKey.includes("mock");
+
         // Inicialização dos serviços do Firebase com tratamento de segurança
         let app, auth, db;
-        try {
-            app = initializeApp(firebaseConfig);
-            auth = getAuth(app);
-            db = getFirestore(app);
-        } catch (e) {
-            console.error("Falha ao inicializar serviços do Firebase:", e);
+        if (isFirebaseConfigured) {
+            try {
+                app = initializeApp(firebaseConfig);
+                auth = getAuth(app);
+                db = getFirestore(app);
+            } catch (e) {
+                console.error("Falha ao inicializar serviços do Firebase:", e);
+            }
         }
 
         // Escudo de Erros para evitar tela branca
@@ -93,6 +101,7 @@
         const IconTrash = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><polyline points="3 6 5 6 21 6"></polyline><path d="M19 6v14a2 2 0 0 1-2 2H7a2 2 0 0 1-2-2V6m3 0V4a2 2 0 0 1 2-2h4a2 2 0 0 1 2 2v2"></path></svg>;
         const IconEdit = () => <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M11 4H4a2 2 0 0 0-2 2v14a2 2 0 0 0 2 2h14a2 2 0 0 0 2-2v-7"></path><path d="M18.5 2.5a2.121 2.121 0 0 1 3 3L12 15l-4 1 1-4 9.5-9.5z"></path></svg>;
         const IconCloud = () => <svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><path d="M18 10a5 5 0 0 0-9.5-2.28 4.3 4.3 0 0 0-3.32 4.1C5 13.55 6.45 15 8.2 15h9.6c2.4 0 4.2-2 4.2-4.5s-1.8-4.5-4-4.5z"></path></svg>;
+        const IconMobile = () => <svg width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round"><rect x="5" y="2" width="14" height="20" rx="2" ry="2"></rect><line x1="12" y1="18" x2="12.01" y2="18"></line></svg>;
 
         const playBeep = () => {
             try {
@@ -345,10 +354,24 @@
             const [selectedStatEx, setSelectedStatEx] = useState(PREDEFINED_EXERCISES[0]);
             const [confirmDelete, setConfirmDelete] = useState(null);
             const [user, setUser] = useState(null);
-            const [loading, setLoading] = useState(true);
+            const [loading, setLoading] = useState(isFirebaseConfigured); // Só ativa ecrã de carregamento se o Firebase estiver configurado
 
-            // Regra 3 do Firestore: Processo de autenticação prioritário executado primeiro
+            // Regra de Autenticação do Firebase / Fallback Local Inteligente
             useEffect(() => {
+                if (!isFirebaseConfigured) {
+                    // Sem Firebase ativo: Inicializa em modo Local/LocalStorage
+                    setUser({ uid: "local-user", displayName: "Atleta Local" });
+                    setLoading(false);
+                    
+                    try {
+                        const saved = localStorage.getItem('gymAppHistory');
+                        if (saved) setHistory(JSON.parse(saved));
+                    } catch (e) {
+                        console.error("Não foi possível aceder ao LocalStorage:", e);
+                    }
+                    return;
+                }
+
                 const initAuth = async () => {
                     try {
                         if (typeof __initial_auth_token !== 'undefined' && __initial_auth_token) {
@@ -357,23 +380,27 @@
                             await signInAnonymously(auth);
                         }
                     } catch (error) {
-                        console.error("Falha na autenticação do Firebase:", error);
+                        console.error("Falha na autenticação do Firebase. Ativando Modo Local:", error);
+                        setUser({ uid: "local-user" });
+                        setLoading(false);
                     }
                 };
                 initAuth();
                 const unsubscribe = onAuthStateChanged(auth, (currentUser) => {
-                    setUser(currentUser);
+                    if (currentUser) {
+                        setUser(currentUser);
+                    } else {
+                        setUser({ uid: "local-user" });
+                    }
                     setLoading(false);
                 });
                 return () => unsubscribe();
             }, []);
 
-            // Obter dados em tempo real do Cloud Firestore (Regra 1, 2 e 3)
+            // Obter dados em tempo real se o Firebase estiver ativo e configurado
             useEffect(() => {
-                if (!user) return;
+                if (!user || user.uid === "local-user" || !isFirebaseConfigured) return;
 
-                // Regra 1: Caminho estrito e seguro
-                // Regra 2: Busca simples sem filtros complexos ou ordenações no banco, tratada na memória da aplicação
                 const workoutsRef = collection(db, 'artifacts', appId, 'users', user.uid, 'workouts');
                 
                 const unsubscribe = onSnapshot(workoutsRef, (snapshot) => {
@@ -381,11 +408,10 @@
                     snapshot.forEach(doc => {
                         list.push({ docId: doc.id, ...doc.data() });
                     });
-                    // Ordenação em memória para manter a compatibilidade
                     list.sort((a, b) => new Date(b.date) - new Date(a.date));
                     setHistory(list);
                 }, (error) => {
-                    console.error("Erro ao obter treinos em tempo real:", error);
+                    console.error("Erro ao obter treinos em tempo real do Firestore:", error);
                 });
 
                 return () => unsubscribe();
@@ -396,9 +422,37 @@
             const todayWorkoutIndex = history.findIndex(w => new Date(w.date).setHours(0,0,0,0) === today);
             const todayWorkoutData = todayWorkoutIndex >= 0 ? history[todayWorkoutIndex] : null;
 
-            // Guardar ou atualizar um treino diretamente na nuvem
+            // Guardar ou atualizar um treino (Guarda no LocalStorage ou Firebase conforme o modo ativo)
             const handleSaveDaily = async (workoutData) => {
                 if (!user) return;
+
+                // Modo Local / Fallback LocalStorage
+                if (user.uid === "local-user" || !isFirebaseConfigured) {
+                    const newHistory = [...history];
+                    const targetDate = new Date(workoutData.date).setHours(0,0,0,0);
+                    const index = newHistory.findIndex(w => new Date(w.date).setHours(0,0,0,0) === targetDate);
+
+                    if (index >= 0) {
+                        if (workoutData.exercises.length === 0) newHistory.splice(index, 1);
+                        else newHistory[index] = workoutData;
+                    } else {
+                        if (workoutData.exercises.length > 0) {
+                            newHistory.unshift(workoutData);
+                            newHistory.sort((a, b) => new Date(b.date) - new Date(a.date));
+                        }
+                    }
+                    setHistory(newHistory);
+                    try {
+                        localStorage.setItem('gymAppHistory', JSON.stringify(newHistory));
+                    } catch (e) {
+                        console.error("Erro ao gravar no LocalStorage:", e);
+                    }
+                    setEditingWorkoutDate(null);
+                    if (activeTab !== 'history') setActiveTab('home');
+                    return;
+                }
+
+                // Modo Firebase / Firestore
                 const dateId = new Date(workoutData.date).toISOString().split('T')[0];
                 const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'workouts', dateId);
 
@@ -418,27 +472,40 @@
                 }
             };
 
-            // Eliminar um treino diretamente na nuvem
+            // Eliminar um treino (No LocalStorage ou Firebase conforme o modo ativo)
             const confirmDeletion = async () => {
-                if (confirmDelete && user) {
+                if (!confirmDelete || !user) return;
+
+                if (user.uid === "local-user" || !isFirebaseConfigured) {
+                    const newHistory = history.filter(w => w.date !== confirmDelete);
+                    setHistory(newHistory);
                     try {
-                        const dateId = new Date(confirmDelete).toISOString().split('T')[0];
-                        const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'workouts', dateId);
-                        await deleteDoc(docRef);
-                        setConfirmDelete(null);
+                        localStorage.setItem('gymAppHistory', JSON.stringify(newHistory));
                     } catch (e) {
-                        console.error("Erro ao eliminar o treino no Firestore:", e);
+                        console.error("Erro ao remover do LocalStorage:", e);
                     }
+                    setConfirmDelete(null);
+                    return;
+                }
+
+                // Modo Firebase / Firestore
+                try {
+                    const dateId = new Date(confirmDelete).toISOString().split('T')[0];
+                    const docRef = doc(db, 'artifacts', appId, 'users', user.uid, 'workouts', dateId);
+                    await deleteDoc(docRef);
+                    setConfirmDelete(null);
+                } catch (e) {
+                    console.error("Erro ao eliminar o treino no Firestore:", e);
                 }
             };
 
-            // Visualização de carregamento inicial seguro
+            // Ecrã de carregamento seguro durante a autenticação em nuvem (se ativa)
             if (loading) {
                 return (
                     <div className="min-h-screen bg-[#F3F4F6] flex flex-col items-center justify-center p-6">
                         <div className="animate-spin rounded-full h-12 w-12 border-t-4 border-b-4 border-[#72AC44] mb-4"></div>
-                        <p className="text-[#05532C] font-semibold text-lg">A ligar ao Firebase...</p>
-                        <p className="text-gray-400 text-xs mt-1">A carregar o teu perfil na nuvem</p>
+                        <p className="text-[#05532C] font-semibold text-lg animate-pulse">A conectar à nuvem...</p>
+                        <p className="text-gray-400 text-xs mt-1">A carregar o teu perfil de atleta</p>
                     </div>
                 );
             }
@@ -461,13 +528,25 @@
                         <h1 className="text-3xl font-bold">Olá, Atleta!</h1>
                         <p className="text-green-100 mt-1 opacity-80">Qual aparelho vamos usar hoje?</p>
                         
-                        {/* Indicador visual premium de sincronização na nuvem com o UID completo do utilizador */}
-                        <div className="mt-4 inline-flex items-center gap-1.5 bg-[#03361c] px-3 py-1.5 rounded-full text-[10px] text-green-300 border border-green-800">
-                            <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
-                            <IconCloud />
-                            <span>Sincronizado na Nuvem</span>
-                        </div>
-                        <p className="text-[9px] text-green-200 mt-1.5 opacity-60 font-mono tracking-wide">ID: {user?.uid}</p>
+                        {/* Indicador visual inteligente do modo de armazenamento */}
+                        {isFirebaseConfigured && user?.uid !== "local-user" ? (
+                            <div className="mt-4 inline-flex items-center gap-1.5 bg-[#03361c] px-3 py-1.5 rounded-full text-[10px] text-green-300 border border-green-800">
+                                <span className="w-1.5 h-1.5 rounded-full bg-green-400 animate-pulse"></span>
+                                <IconCloud />
+                                <span>Sincronizado na Nuvem</span>
+                            </div>
+                        ) : (
+                            <div className="mt-4 inline-flex items-center gap-1.5 bg-[#1e3a1e] px-3 py-1.5 rounded-full text-[10px] text-yellow-300 border border-emerald-800">
+                                <span className="w-1.5 h-1.5 rounded-full bg-yellow-400"></span>
+                                <IconMobile />
+                                <span>Modo Local (Seguro no telemóvel)</span>
+                            </div>
+                        )}
+                        {isFirebaseConfigured && user?.uid !== "local-user" ? (
+                            <p className="text-[9px] text-green-200 mt-1.5 opacity-60 font-mono tracking-wide">ID: {user?.uid}</p>
+                        ) : (
+                            <p className="text-[9px] text-emerald-200 mt-1.5 opacity-60 font-medium">Dados guardados apenas no dispositivo</p>
+                        )}
                     </header>
 
                     <main className="px-4 -mt-4 bg-[#F3F4F6] h-full rounded-t-3xl pt-8 pb-10 min-h-[calc(100vh-160px)]">
@@ -522,7 +601,7 @@
                         <div className="space-y-4">
                             <h2 className="text-xl font-bold text-[#05532C] px-2">Diário de Treinos</h2>
                             {history.length === 0 ? (
-                            <p className="text-center text-gray-500 py-10">Nenhum treino registado ainda na nuvem.</p>
+                            <p className="text-center text-gray-500 py-10">Nenhum treino registado ainda.</p>
                             ) : (
                             history.map((h, i) => (
                                 <div key={i} className="bg-white p-5 rounded-2xl shadow-sm border border-gray-100">
@@ -569,7 +648,7 @@
                         <div className="fixed inset-0 bg-black bg-opacity-50 flex items-center justify-center z-50 p-4">
                             <div className="bg-white rounded-3xl w-full max-w-sm p-6 text-center shadow-2xl">
                                 <h3 className="font-bold text-xl text-[#05532C] mb-2">Eliminar Treino?</h3>
-                                <p className="text-gray-500 mb-6 text-sm">Tens a certeza que queres eliminar este treino? Esta ação irá apagar definitivamente os dados do Cloud Firestore.</p>
+                                <p className="text-gray-500 mb-6 text-sm">Tens a certeza que queres eliminar este treino? Esta ação irá apagar definitivamente os dados gravados.</p>
                                 <div className="flex gap-3">
                                     <button onClick={() => setConfirmDelete(null)} className="flex-1 py-3 bg-gray-100 text-gray-600 rounded-xl font-bold hover:bg-gray-200 transition-colors">Cancelar</button>
                                     <button onClick={confirmDeletion} className="flex-1 py-3 bg-red-500 text-white rounded-xl font-bold hover:bg-red-600 transition-colors shadow-lg shadow-red-500/30">Eliminar</button>
